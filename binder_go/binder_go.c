@@ -1,10 +1,4 @@
 #include "binder_pro.h"
-#include "binder_client_action.h"
-#include "binder_malloc.h"
-#include "binder_init.h"
-#include "binder_map.h"
-#include "binder_rb_tree.h"
-#include "binder_server_action.h"
 
 /*
 struct binder_dev {
@@ -159,7 +153,7 @@ static long binder_pro_ioctl(struct file *file, unsigned int cmd, unsigned long 
 	return BIND_RET_SUCCESS;
 }
 
-#include "binder_combin_test.h"
+///#include "binder_combin_test.h"
 
 static int binder_pro_release(struct inode *inode, struct file *filp) {
 	delete_rpc_by_pid();

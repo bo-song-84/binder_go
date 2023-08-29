@@ -1,3 +1,4 @@
+#include "binder_pro.h"
 #ifndef BINDER_COMBIN_TEST_H
 #define BINDER_COMBIN_TEST_H
 

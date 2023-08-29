@@ -1,0 +1,147 @@
+Bind pro设计文档
+一、简单需求描述
+满足进程间通信的需求
+快速响应能力
+二、总体设计思路
+2.1采用共享内存传递参数的输入和输出
+2.2 禁止rpc嵌套调用，同时允许一个客户端一次调用多个rpc，满足多个需求同时减少等待次数
+2.3 rpc id注册内核采用红黑树结构
+2.4 采用信号的方式通知服务端
+2.5同一个服务端需要处理的服务进程采用链表形式
+三、进程间通信的共享内存设计
+共享内存在驱动中申请一块连续内存，并且将其进行格式化（可以采用32、64、128字节对齐），供所有的客户端和服务端使用。
+3.1 共享内存的总体设计
+共享内存分为六大块，超级快、每CPU块、业务节点位图块、数据位图块、业务节点块、数据块
+3.2 超级块的设计
+超级块主要用来记录其他数据块的使用情况和分布情况，以便于方便的管理其他数据块，其数据结构设计如下：
+Struct bind_super{
+Int cpuNum;			//记录cpu数量
+Int per_cpu_start; 		//每cpu在共享内存中的起始位置
+
+Int node_map_start;	//记录业务节点位图起点
+Int node_start;		//记录业务节点起点
+int node_num_total;	//记录业务节点总数量
+Int node_num_left;		//记录业务节点剩余数量
+
+Int data_map_start;	//记录数据位图起点
+Int data_start;			//记录数据块起点
+Int data_num_total;	//记录数据块总数据量
+Int data_num_left;		//记录数据块剩余数量
+}
+3.3 每cpu数据块的设计
+每cpu块主要用来共给固定cpu的使用，主要是为了减少锁的争用，提高效率，每cpu使用一定要快速，在不需要使用时立即释放，供其他进程使用，在使用每cpu时，需要禁止被抢占。
+Struct bind_percpu{
+Mutex_lock lock;  //主要是为了防止进程被抢占导致的数据异常，如果开启禁止抢占内核，这个锁就不需要了
+int cpuid; 		//cpuid
+Pid_t pid;			//当前使用进程的pid
+Int role;			//当前进程的角色  server、client or no rpc
+Int server_start_id;// 当前进程为server时，第一个需要服务的node节点id
+Int client_server_max; //一个客户端可以同时申请服务的最大数量
+Int client_need_server_num;//当前进程为client,发起的服务数量
+Struct client_server server_need_start[0];	//记录客户端需要服务的其实位置
+}
+
+Struct client_server {
+Uint rpc_id;	//需要调用的rpc id
+Uint input_size;	//输入参数的长度
+Uint output_size;	//输出参数的长度
+Uint rpc_node_id;	//rpc节点编号
+}
+3.4 业务节点块设计
+业务节点主要记录当前需要处理的rpc业务并且记录业务处理的状态和业务处理需要的数据
+Struct rpc_node {
+Char rpc_status;	//记录当前节点处理状态，客户端请求中、服务端处理中、服务端处理完、客户端已确认
+Pid_t client_pid;	//客户端pid
+Pid_t service_pid;	//服务端pid
+Int input_data;	//客户端输入数据
+Int input_data_size;//输入长度
+Int output_data;	//服务端返回值和数据
+Int output_data_size; //输出长度
+Int next_client_req;	//客户端的下一个请求
+Int next_service_req;	//服务端下一个需要处理的请求
+}
+三、禁止rpc嵌套调用和支持客户端多个rpc同时调用
+Rpc的嵌套调用会导致rpc响应速度变慢，导致用户体验感变差。
+通过禁止rpc嵌套调用，可以提高rpc响应速度，但是一个rpc可能不能满足客户端的需求，所以客户端同时调用多个rpc可以满足客户端的需求。
+禁止rpc嵌套调用的方法：在调用rpc之前，查看每cpu位置上的角色，如果角色为服务器，则程序报错。
+接口设计：##############这个位置设计有问题
+Bool check_local_role(); //检查当前cpu的rpc role
+{
+Return local_cpu->role == service;
+}
+客户端多个rpc调用的方法：在每cpu中写入所有的请求id。
+方法实现：
+Struct rpc_calls
+{
+Unsigned int rpc_code;
+Void *input;
+Void input_len;
+Void *output;
+Void *output_len;
+}
+构造实现结构体：
+Unsigned int rpc call_Prepare(unsigned int rpc_calls_num, struct *rpc_calls)
+{
+Uint max_rpc_calls = 0;
+
+Struct per_cpu* per_cpu = get_per_cpu_area();
+Per_cpu->role = CLIENT_ROLE;
+Per_cpu->pid = getpid();
+Per_cpu->rpc_calls = rpc_calls;
+Struct client_server *client_server = get_client_server_address();
+
+If (rpc_calls ->per_cpu->max_rpc_calls) {
+Printf(“error message rpc_calls :%d > max_rpc_calls :%d”, rpc calls, max_rpc_calls);
+Return fail;
+}
+
+Set_rpc_calls_num(rpc_calls);
+
+For(int i = 0; i < rpc_calls;i++)
+{
+Client_server[i]->code = rpc[i]->code;
+Client_server[i]->input_size = rpc[i]->input_size;
+Client_server[i]->output_size = rpc[i]->output_size;
+Client_server[i]->rpc_node_id = 0;
+}
+}
+
+四、rpc注册以及rpc调用组织
+4.1 rpc通过客户端注册到内核中，驱动通过红黑树组织
+Rpc在内核中注册的结构体表示如下：
+Struct rpc_register {
+Struct rb_tree rb_node;
+Int rpc_id;
+Pid_t pid;
+}
+4.2 rpc的调用通过pid进行组织,驱动通过红黑树组织
+Rpc调用的结构体如下：
+Struct rpc_call_back{
+Struct rb_tree rb_node;
+Pid_t pid;
+Int flags; //该节点状态，无待处理、有待处理、处理中
+Int rpc_start_node_id;
+Int 
+}
+通过rpc_start_node_id找到第一个需要调用的rpc，通过调用链表找到所有需要执行的服务。
+4.3 客户端调用状态
+客户端调用采用hash散列表来组织，方便查找、插入、和删除
+Rpc客户端的的状态如下：
+Struct rpc_client_wait{
+Struct list_head head;
+Pid_t pid;
+Int rpc_start_node_id;
+}
+五、驱动的设计
+5.1 申请一块内存，初始化并且为客户端分配内存
+5.1.1 申请客户端节点
+5.1.2 申请客户端输入输出数据块
+5.2 注册rpc设计
+5.3 注册rpc server设计
+5.4 注册客户端请求设计
+5.5 处理客户端等待设计
+六、用户程序接口设计
+6.1 注册rpc接口
+6.2 注册client request接口
+6.3 处理rpc请求接口
+
